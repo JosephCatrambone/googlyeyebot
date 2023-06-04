@@ -1,4 +1,5 @@
 import asyncio
+import io
 import math
 import os
 import random
@@ -14,7 +15,9 @@ from PIL import Image, ImageDraw
 
 
 # Constants:
-FACE_DETECTOR_MODEL_PATH="./models/face_landmarker.task"
+DEFAULT_ODDS_OF_GOOGLY = 0  # One in this many.  At zero, it's tagged only.
+COOLDOWN_SECONDS = 300
+FACE_DETECTOR_MODEL_PATH = "./models/face_landmarker.task"
 
 
 @dataclass
@@ -38,7 +41,7 @@ def find_faces_and_eyes(image: Image.Image) -> List[FaceDetection]:
 		base_options=BaseOptions(model_asset_path=FACE_DETECTOR_MODEL_PATH),
 		running_mode=VisionRunningMode.IMAGE,
 		num_faces=10,
-		min_face_detection_confidence=0.1,
+		min_face_detection_confidence=0.4,
 		output_face_blendshapes=False,
 		output_facial_transformation_matrixes=False,
 	)
@@ -77,14 +80,14 @@ def draw_all_eyes(
 			image,
 			(d.eye_left_x, d.eye_left_y),
 			((random.random()-0.5)*2.0, (random.random()-0.5)*2.0,),
-			eye_size=ipd*0.3,
+			eye_radius_pixels=ipd * 0.3,
 			pupil_percent=pupil_percent,
 		)
 		draw_eye(
 			image,
 			(d.eye_right_x, d.eye_right_y),
 			((random.random() - 0.5) * 2.0, (random.random() - 0.5) * 2.0,),
-			eye_size=ipd * 0.3,
+			eye_radius_pixels=ipd * 0.3,
 			pupil_percent=pupil_percent,
 		)
 	return image
@@ -94,19 +97,27 @@ def draw_eye(
 		image: Image.Image,
 		eye_position: Tuple[int, int],
 		eye_look: Tuple[float, float],
-		eye_size: float,
+		eye_radius_pixels: float,
 		pupil_percent: float,
 ) -> None:
 	canvas = ImageDraw.Draw(image)
+	# Draw sclera.
 	canvas.ellipse([
-			eye_position[0]-eye_size, eye_position[1]-eye_size,
-			eye_position[0]+eye_size, eye_position[1]+eye_size
+		eye_position[0] - eye_radius_pixels, eye_position[1] - eye_radius_pixels,
+		eye_position[0] + eye_radius_pixels, eye_position[1] + eye_radius_pixels
 		], fill=(255, 255, 255)
 	)
+	# Draw pupil:
+	# The eye_look is a vector from zero to one, but the effective distance of the vector is constrained by the pupil percentage.
+	# That is to say, a huge pupil at maximum deflection of [1, 1] will have a center that's closer to the origin than a tiny one.
+	pupil_max_distance = eye_radius_pixels*(1.0-pupil_percent)
+	pupil_radius_pixels = eye_radius_pixels*pupil_percent
+	pupil_center_x = eye_position[0] + (eye_look[0] * pupil_max_distance)
+	pupil_center_y = eye_position[1] + (eye_look[1] * pupil_max_distance)
 	canvas.ellipse([
-		eye_position[0] - eye_size, eye_position[1] - eye_size,
-		eye_position[0] + eye_size, eye_position[1] + eye_size
-	], fill=(255, 255, 255)
+			pupil_center_x - pupil_radius_pixels, pupil_center_y - pupil_radius_pixels,
+			pupil_center_x + pupil_radius_pixels, pupil_center_y + pupil_radius_pixels,
+		], fill=(0, 0, 0)
 	)
 
 
@@ -116,7 +127,8 @@ def build_discord_bot():
 	class GooglyEyeClient(discord.Client):
 		def __init__(self, *args, **kwargs):
 			super().__init__(*args, **kwargs)
-			self.odds_of_magic = 100
+			self.odds_of_magic = dict()  # Server to magic frequency.  Set to 'zero' for only googlying when tagged.
+			self.last_reply = dict()  # Server to last googly-ing.
 
 		async def on_ready(self):
 			print(f'Logged on as {self.user}!')
@@ -132,7 +144,10 @@ def build_discord_bot():
 
 			# Maybe we can finish early still:
 			mentioned_explicitly = self.user.mentioned_in(message)
-			perform_magic = random.randint(0, self.odds_of_magic) == 0  # One in one-hundred?
+			perform_magic = False
+			if self.odds_of_magic.get(message.guild.id, DEFAULT_ODDS_OF_GOOGLY) > 0:
+				# If the guild has set our odds of googly-ing to 0, then we only do it when asked specifically.
+				perform_magic = random.randint(0, self.odds_of_magic.get(message.guild.id, DEFAULT_ODDS_OF_GOOGLY)) == 0
 			if not (mentioned_explicitly or perform_magic):
 				return
 
@@ -150,6 +165,18 @@ def build_discord_bot():
 			if not face_data:
 				await message.reply("Sorry, I couldn't find any faces in that image.", mention_author=True)
 
+			# Do the compute:
+			res = draw_all_eyes(image, face_data)
+
+			# Upload the result
+			stream = io.BytesIO()
+			res.save(stream, format="PNG")
+			stream.seek(0)
+			file = discord.File(stream, filename="image.png")  # Path OR File pointer
+			embed = discord.Embed()
+			embed.set_image(url="attachment://image.png")
+			#await channel.send(file=file, embed=embed)
+			await message.reply(file=file, mention_author=True)
 
 		async def _find_image_in_message(self, message: discord.Message) -> Optional[Image.Image]:
 			# Check the embeds and the attachments for a URL.
@@ -175,7 +202,11 @@ def build_discord_bot():
 				async with aiohttp.ClientSession() as session:
 					async with session.get(image_url) as response:
 						try:
-							data = Image.open(await response.content.read())
+							content = await response.content.read()
+							buffer = io.BytesIO()
+							buffer.write(content)  # TODO: Image.frombuffer instead.
+							buffer.seek(0)
+							data = Image.open(buffer)
 							return data
 						except Exception as e:
 							print(f"Exception fetching image data: {e}")
@@ -192,13 +223,7 @@ def build_discord_bot():
 		async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
 			# This requires Intents.reactions to be enabled.
 			# To get the Message being reacted, access it via Reaction.message.
-			pass
-
-		async def upload_image_file(self):
-			file = discord.File("path or filelike", filename="image.png")  # Path OR File pointer
-			embed = discord.Embed()
-			embed.set_image(url="attachment://image.png")
-			await channel.send(file=file, embed=embed)
+			print(f"{payload.emoji.id} - {payload.emoji.name} - {payload.message_id}")
 
 	intents = discord.Intents.default()
 	intents.message_content = True
@@ -207,10 +232,8 @@ def build_discord_bot():
 
 
 def main():
-	#client = build_discord_bot()
-	#client.run(os.environ['DISCORD_BOT_TOKEN'])
-	image = Image.open("/tmp/test2.jpg")
-	out = find_faces_and_eyes(image)
+	client = build_discord_bot()
+	client.run(os.environ['DISCORD_BOT_TOKEN'])
 
 
 if __name__ == "__main__":
