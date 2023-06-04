@@ -1,4 +1,5 @@
 # googlyeyebot
+<<<<<<< HEAD
 
 A Telegram + Discord Bot to add googly-eyes to things.
 For the Telegram + Discord bots, can be configured to run 'headless' where it will pick images at random and reply to them, or can reply when tagged.
@@ -8,3 +9,5 @@ Steps:
 2. Make base function to add googly eyes to images.
 3. Get bot listening for messages and tags.
 4. Wrap up as docker image.  Set free.
+=======
+>>>>>>> 5049d87a9ca33aa433b764143ddae98273836357
