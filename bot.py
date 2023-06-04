@@ -142,6 +142,20 @@ def build_discord_bot():
 			if message.author.id == self.user.id:
 				return
 
+			await self.maybe_enhance(message)
+
+		async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+			# This requires Intents.reactions to be enabled.
+			# To get the Message being reacted, access it via Reaction.message.
+			print(f"{payload.emoji.id} - {payload.emoji.name} - {payload.message_id}")
+			# Can we do better than '👍'?  Is this universal?
+			if payload.emoji.name == '👎':
+				message = await self.get_channel(payload.channel_id).fetch_message(payload.message_id)
+				if message.author.id == self.user.id:
+					await message.delete()
+					print("Removing message ID because of thumbs down.")
+
+		async def maybe_enhance(self, message: discord.Message):
 			# Maybe we can finish early still:
 			mentioned_explicitly = self.user.mentioned_in(message)
 			perform_magic = False
@@ -164,6 +178,7 @@ def build_discord_bot():
 			face_data = find_faces_and_eyes(image)
 			if not face_data:
 				await message.reply("Sorry, I couldn't find any faces in that image.", mention_author=True)
+				return
 
 			# Do the compute:
 			res = draw_all_eyes(image, face_data)
@@ -219,11 +234,6 @@ def build_discord_bot():
 				return None
 			ref = ref.resolved
 			return await self._find_image_in_message(ref)
-
-		async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-			# This requires Intents.reactions to be enabled.
-			# To get the Message being reacted, access it via Reaction.message.
-			print(f"{payload.emoji.id} - {payload.emoji.name} - {payload.message_id}")
 
 	intents = discord.Intents.default()
 	intents.message_content = True
